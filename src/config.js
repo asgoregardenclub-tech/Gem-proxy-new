@@ -80,6 +80,37 @@ export const config = {
   retryAttempts: Number(process.env.RETRY_ATTEMPTS || 1),
   retryBaseDelayMs: Number(process.env.RETRY_BASE_DELAY_MS || 500),
 
+  // --- "Waiting in line" for overloaded models (see lib/lineQueue.js) ----
+  // When true, a 503 from Gemini is NOT retried blindly and NOT returned to
+  // the client. The request waits in a per-model line instead; only one
+  // request at a time (the head of the line) re-tries, at a growing
+  // interval, so waiting costs ONE request per interval for everybody
+  // instead of one per retry per user. While this is on, RETRY_ATTEMPTS /
+  // RETRY_BASE_DELAY_MS are ignored. Off by default.
+  lineWaiting: process.env.LINE_WAITING === 'true',
+  // Upstream statuses that count as "overloaded -> go wait in line".
+  // Comma-separated. Default: just 503. (e.g. LINE_STATUSES=503,500)
+  lineStatuses: new Set(
+    (process.env.LINE_STATUSES || '503')
+      .split(',')
+      .map((s) => Number(s.trim()))
+      .filter(Boolean)
+  ),
+  // Delay before the first re-try after a 503, doubling on each further
+  // 503 up to LINE_MAX_DELAY_MS. Higher = fewer wasted requests, slower
+  // pickup once the model recovers.
+  lineBaseDelayMs: Number(process.env.LINE_BASE_DELAY_MS || 10_000),
+  lineMaxDelayMs: Number(process.env.LINE_MAX_DELAY_MS || 60_000),
+  // Total time one request is willing to wait in line before it gives up
+  // and returns a 503 to the client. Keep below REQUEST_TIMEOUT_MS.
+  lineMaxWaitMs: Number(process.env.LINE_MAX_WAIT_MS || 300_000),
+  // Gap between releasing queued requests once the model recovers, so a
+  // crowd doesn't hit it all at once and bring the 503s straight back.
+  lineStaggerMs: Number(process.env.LINE_STAGGER_MS || 1_500),
+  // Streaming clients get an SSE comment this often while waiting so the
+  // connection isn't dropped as idle.
+  lineKeepaliveMs: Number(process.env.LINE_KEEPALIVE_MS || 15_000),
+
   // Applied ONLY when the client didn't already set the field itself.
   defaultTemperature: optionalNumber('DEFAULT_TEMPERATURE'),
   defaultTopP: optionalNumber('DEFAULT_TOP_P'),
