@@ -4,6 +4,7 @@ import { applyGenerationDefaults, resolveThinkingConfig, extractParts } from '..
 import { extractInlineCommands, applyInlineCommands } from '../lib/inlineCommands.js';
 import { applyRoleplayTricks, friendlyErrorMessage } from '../lib/roleplayTricks.js';
 import { fetchWithRetry } from '../lib/upstreamFetch.js';
+import { createLineQueue, LineTimeoutError } from '../lib/lineQueue.js';
 import { getCandidateKeys, isKeyExhaustionError, markKeyExhausted, markKeySuccess, maskKey } from '../lib/keyManager.js';
 import { logGeminiRequest } from '../lib/requestLog.js';
 import {
@@ -17,6 +18,13 @@ import {
 } from '../lib/geminiSafety.js';
 
 const router = express.Router();
+
+// One shared line per model (only consulted when LINE_WAITING=true).
+const lineQueue = createLineQueue({
+  baseDelayMs: config.lineBaseDelayMs,
+  maxDelayMs: config.lineMaxDelayMs,
+  staggerMs: config.lineStaggerMs,
+});
 
 
 function flattenContent(content) {
@@ -135,6 +143,32 @@ router.post('/v1beta/openai/chat/completions', async (req, res, next) => {
   // stream mode the log line is for.
   let model = 'unknown';
   let wantsStream = false;
+  // Hoisted so the catch block can stop it too.
+  let keepAlive;
+  const stopKeepAlive = () => {
+    clearInterval(keepAlive);
+    keepAlive = undefined;
+  };
+
+  // Once we've started an SSE response (to keep the client connection alive
+  // while waiting in line) we can no longer send an HTTP error status, so
+  // errors have to go out as a final chunk in the stream instead.
+  function sendError(status, message) {
+    stopKeepAlive();
+    if (res.destroyed) return;
+    if (!res.headersSent) return res.status(status).json({ error: { message } });
+    res.write(
+      openaiChunk({
+        completionId: `chatcmpl-${Date.now()}`,
+        createdTs: Math.floor(Date.now() / 1000),
+        model,
+        deltaText: `[Proxy] ${message}`,
+        finishReason: 'stop',
+      })
+    );
+    res.write('data: [DONE]\n\n');
+    res.end();
+  }
 
   try {
     const body = applyGenerationDefaults(req.body || {});
@@ -189,53 +223,135 @@ router.post('/v1beta/openai/chat/completions', async (req, res, next) => {
     let errText;
     let parsedError;
 
-    for (let attempt = 0; attempt < candidateKeys.length; attempt++) {
-      const key = candidateKeys[attempt];
-      headers.set('x-goog-api-key', key);
+    // --- "Waiting in line" (LINE_WAITING=true, see lib/lineQueue.js) ------
+    // The key-rotation loop below runs once per turn in line. Healthy model:
+    // one turn, straight through. 503: take our place at the front of the
+    // line and wait for the next turn instead of retrying/returning.
+    const lineOn = config.lineWaiting;
+    const lineDeadline = Date.now() + config.lineMaxWaitMs;
+    let lineTurns = 0;
+    let lineGaveUp = false;
 
-      upstream = await fetchWithRetry(
-        targetUrl,
-        {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(geminiBody),
-          signal: controller.signal,
-        },
-        { attempts: config.retryAttempts, baseDelayMs: config.retryBaseDelayMs }
-      );
+    if (lineOn) {
+      // A client that hangs up while waiting must not leave a ghost request
+      // behind that later fires and burns quota for nobody.
+      res.on('close', () => {
+        if (!res.writableEnded) controller.abort();
+      });
+    }
 
-      if (upstream.ok) {
-        markKeySuccess(key, keyList);
-        break;
+    // Streaming clients: open the SSE response now and send comment lines
+    // while waiting, so the connection isn't dropped as idle.
+    function startKeepAlive() {
+      if (!wantsStream || keepAlive || res.destroyed) return;
+      if (!res.headersSent) {
+        res.setHeader('content-type', 'text/event-stream');
+        res.setHeader('cache-control', 'no-cache');
+        res.setHeader('connection', 'keep-alive');
+        res.flushHeaders();
+      }
+      res.write(': waiting in line\n\n');
+      keepAlive = setInterval(() => res.write(': waiting in line\n\n'), config.lineKeepaliveMs);
+    }
+
+    while (true) {
+      let ticket;
+      if (lineOn) {
+        // Model already known to be overloaded (or we just got a 503):
+        // we're about to wait, so start the keep-alive first.
+        if (lineTurns > 0 || lineQueue.snapshot(model).failures > 0) startKeepAlive();
+        try {
+          ticket = await lineQueue.joinLine(model, {
+            signal: controller.signal,
+            deadline: lineDeadline,
+            front: lineTurns > 0, // keep our place: we've been waiting longest
+          });
+        } catch (err) {
+          if (err instanceof LineTimeoutError) {
+            lineGaveUp = true;
+            break;
+          }
+          throw err;
+        }
+        lineTurns++;
+        if (ticket.waitedMs > 0) {
+          console.log(`[line] ${model} turn #${lineTurns} after ${Math.round(ticket.waitedMs / 1000)}s in line`);
+        }
       }
 
-      errText = await upstream.text();
-      parsedError = undefined;
       try {
-        parsedError = JSON.parse(errText)?.error;
-      } catch {
-        // errText wasn't JSON — use it as-is further down.
+        for (let attempt = 0; attempt < candidateKeys.length; attempt++) {
+          const key = candidateKeys[attempt];
+          headers.set('x-goog-api-key', key);
+
+          upstream = await fetchWithRetry(
+            targetUrl,
+            {
+              method: 'POST',
+              headers,
+              body: JSON.stringify(geminiBody),
+              signal: controller.signal,
+            },
+            { attempts: lineOn ? 1 : config.retryAttempts, baseDelayMs: config.retryBaseDelayMs }
+          );
+
+          if (upstream.ok) {
+            markKeySuccess(key, keyList);
+            break;
+          }
+
+          errText = await upstream.text();
+          parsedError = undefined;
+          try {
+            parsedError = JSON.parse(errText)?.error;
+          } catch {
+            // errText wasn't JSON — use it as-is further down.
+          }
+
+          const isLastCandidate = attempt === candidateKeys.length - 1;
+          if (!isLastCandidate && isKeyExhaustionError(upstream.status, parsedError, errText)) {
+            // A truly dead/revoked key (UNAUTHENTICATED / "API key not
+            // valid") is never coming back on its own — leave it out of
+            // rotation far longer than a merely rate-limited/quota-exhausted
+            // one, which resets on its own before long.
+            const looksPermanentlyDead =
+              parsedError?.status === 'UNAUTHENTICATED' ||
+              /api key not valid|api_key_invalid|api key expired/i.test(parsedError?.message || errText || '');
+            const cooldownMs = looksPermanentlyDead ? config.keyInvalidCooldownMs : config.keyCooldownMs;
+
+            markKeyExhausted(key, cooldownMs, parsedError?.message || errText, keyList);
+            console.warn(`[gemini] key ${maskKey(key)} failed (status=${upstream.status}), rotating to next key`);
+            continue;
+          }
+
+          break;
+        }
+      } catch (err) {
+        ticket?.release();
+        throw err;
       }
 
-      const isLastCandidate = attempt === candidateKeys.length - 1;
-      if (!isLastCandidate && isKeyExhaustionError(upstream.status, parsedError, errText)) {
-        // A truly dead/revoked key (UNAUTHENTICATED / "API key not
-        // valid") is never coming back on its own — leave it out of
-        // rotation far longer than a merely rate-limited/quota-exhausted
-        // one, which resets on its own before long.
-        const looksPermanentlyDead =
-          parsedError?.status === 'UNAUTHENTICATED' ||
-          /api key not valid|api_key_invalid|api key expired/i.test(parsedError?.message || errText || '');
-        const cooldownMs = looksPermanentlyDead ? config.keyInvalidCooldownMs : config.keyCooldownMs;
-
-        markKeyExhausted(key, cooldownMs, parsedError?.message || errText, keyList);
-        console.warn(`[gemini] key ${maskKey(key)} failed (status=${upstream.status}), rotating to next key`);
-        continue;
+      if (lineOn) {
+        if (config.lineStatuses.has(upstream.status)) {
+          ticket.overloaded();
+          const { waiting, nextInMs } = lineQueue.snapshot(model);
+          console.warn(
+            `[line] ${model} got ${upstream.status}; waiting in line (next try in ~${Math.round(nextInMs / 1000)}s, ${waiting} waiting)`
+          );
+          continue;
+        }
+        ticket.success();
       }
-
       break;
     }
     clearTimeout(timeoutId);
+
+    if (lineGaveUp) {
+      const waitedS = Math.round((Date.now() - startedAt) / 1000);
+      const message = `Gemini model "${model}" is still overloaded after waiting ${waitedS}s in line. Try again in a bit.`;
+      logGeminiRequest({ model, stream: wantsStream, status: 503, durationMs: Date.now() - startedAt, error: message });
+      return sendError(503, message);
+    }
 
     if (!upstream.ok) {
       const message = friendlyErrorMessage(parsedError, parsedError?.message || errText, model);
@@ -246,8 +362,9 @@ router.post('/v1beta/openai/chat/completions', async (req, res, next) => {
         durationMs: Date.now() - startedAt,
         error: message,
       });
-      return res.status(upstream.status).json({ error: { message } });
+      return sendError(upstream.status, message);
     }
+    stopKeepAlive();
 
     const completionId = `chatcmpl-${Date.now()}`;
     const createdTs = Math.floor(Date.now() / 1000);
@@ -305,9 +422,11 @@ router.post('/v1beta/openai/chat/completions', async (req, res, next) => {
     }
 
     // Streaming: re-emit Gemini's native SSE chunks as OpenAI-style chunks.
-    res.setHeader('content-type', 'text/event-stream');
-    res.setHeader('cache-control', 'no-cache');
-    res.setHeader('connection', 'keep-alive');
+    if (!res.headersSent) {
+      res.setHeader('content-type', 'text/event-stream');
+      res.setHeader('cache-control', 'no-cache');
+      res.setHeader('connection', 'keep-alive');
+    }
 
     let buffer = '';
     // Thinking spans multiple SSE chunks, so opening/closing the tag inside
@@ -466,6 +585,8 @@ router.post('/v1beta/openai/chat/completions', async (req, res, next) => {
     });
   } catch (err) {
     clearTimeout(timeoutId);
+    stopKeepAlive();
+    if (res.destroyed) return; // client already gone (e.g. hung up while waiting in line)
     if (err.name === 'AbortError') {
       logGeminiRequest({
         model,
@@ -474,7 +595,7 @@ router.post('/v1beta/openai/chat/completions', async (req, res, next) => {
         durationMs: Date.now() - startedAt,
         error: 'Upstream Gemini request timed out.',
       });
-      return res.status(504).json({ error: { message: 'Upstream Gemini request timed out.' } });
+      return sendError(504, 'Upstream Gemini request timed out.');
     }
     next(err);
   }
