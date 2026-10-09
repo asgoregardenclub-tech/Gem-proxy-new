@@ -23,12 +23,18 @@
 //   <NARRATION_MODE=simple|professional>
 //   <LIVING_WORLD=true|false>
 //   <REAL_TEXTING=true|false>
+//   <DIALOGUE_RATIO=low|medium|high>
+//   <PACING=slow|normal|fast>
+//   <VARY_OPENERS=true|false>
+//   <REALISM=true|false>
+//   <CONTINUITY=true|false>
+//   <PROACTIVE=true|false>
 //
 // Every matched tag (plus the whitespace/newline immediately around it) is
 // removed from the message text before anything else touches it — none of
 // this is meant to be visible to the model.
 
-import { RESPONSE_LENGTHS, NARRATION_MODES } from './roleplayPrompts.js';
+import { RESPONSE_LENGTHS, NARRATION_MODES, DIALOGUE_RATIOS, PACINGS } from './roleplayPrompts.js';
 
 const BOOL_VALUES = { true: true, on: true, 1: true, false: false, off: false, 0: false };
 const BOOL_ALT = 'true|false|on|off|1|0';
@@ -57,6 +63,12 @@ const TAG_DEFS = [
   { key: 'narrationMode', pattern: tagPattern('NARRATION_MODE', NARRATION_MODES.join('|')), parse: lowerParse },
   { key: 'livingWorld', pattern: tagPattern('LIVING_WORLD', BOOL_ALT), parse: boolParse },
   { key: 'realTexting', pattern: tagPattern('REAL_TEXTING', BOOL_ALT), parse: boolParse },
+  { key: 'dialogueRatio', pattern: tagPattern('DIALOGUE_RATIO', DIALOGUE_RATIOS.join('|')), parse: lowerParse },
+  { key: 'pacing', pattern: tagPattern('PACING', PACINGS.join('|')), parse: lowerParse },
+  { key: 'varyOpeners', pattern: tagPattern('VARY_OPENERS', BOOL_ALT), parse: boolParse },
+  { key: 'realism', pattern: tagPattern('REALISM', BOOL_ALT), parse: boolParse },
+  { key: 'continuity', pattern: tagPattern('CONTINUITY', BOOL_ALT), parse: boolParse },
+  { key: 'proactive', pattern: tagPattern('PROACTIVE', BOOL_ALT), parse: boolParse },
 ];
 
 // Keys that map straight onto cfg fields of the same name.
@@ -68,6 +80,12 @@ const CFG_KEYS = [
   'narrationMode',
   'livingWorld',
   'realTexting',
+  'dialogueRatio',
+  'pacing',
+  'varyOpeners',
+  'realism',
+  'continuity',
+  'proactive',
 ];
 
 // Runs every tag pattern over one string, recording the LAST value seen for
