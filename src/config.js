@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { RESPONSE_LENGTHS, NARRATION_MODES, normalizeChoice } from './lib/roleplayPrompts.js';
 
 function optionalNumber(name) {
   return process.env[name] !== undefined ? Number(process.env[name]) : undefined;
@@ -181,4 +182,23 @@ export const config = {
   // Gives Gemini a Google Search tool it can call mid-generation for
   // real-world facts/grounding.
   enableGoogleSearch: process.env.ENABLE_GOOGLE_SEARCH === 'true',
+
+  // --- Roleplay style prompts (see lib/roleplayPrompts.js) ---------------
+  // All OFF/unset by default. Each adds a short directive block to Gemini's
+  // systemInstruction. Every one can also be overridden per-chat with an
+  // inline tag (e.g. <RESPONSE_LENGTH=long>) — see lib/inlineCommands.js.
+
+  // banter | short | medium | long | novel. Anything else is ignored.
+  responseLength: normalizeChoice(process.env.RESPONSE_LENGTH, RESPONSE_LENGTHS),
+  // Suppress stock AI-writing cliches.
+  noAism: process.env.NO_AISM === 'true',
+  // Consistent markdown: "quotes" for speech, *italics* for narration,
+  // *(italic parens)* for inner monologue, `backticks` for texts, etc.
+  forceMarkdown: process.env.FORCE_MARKDOWN === 'true',
+  // simple | professional. Anything else is ignored.
+  narrationMode: normalizeChoice(process.env.NARRATION_MODE, NARRATION_MODES),
+  // NPCs have their own lives; crowds talk and bump into each other.
+  livingWorld: process.env.LIVING_WORLD === 'true',
+  // Texts written the way each character would really type them.
+  realTexting: process.env.REAL_TEXTING === 'true',
 };
