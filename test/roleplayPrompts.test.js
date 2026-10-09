@@ -94,3 +94,55 @@ test('no commands: cfg returned untouched (same object)', () => {
   const cfg = { noAism: true };
   assert.equal(applyInlineCommands(cfg, {}, {}).cfg, cfg);
 });
+
+// --- DIALOGUE_RATIO / PACING / VARY_OPENERS / REALISM / CONTINUITY / PROACTIVE ---
+
+test('dialogue ratio and pacing produce directives; normal pacing adds nothing', () => {
+  assert.ok(buildRoleplayDirectives({ dialogueRatio: 'high' }).includes('DIALOGUE RATIO — HIGH'));
+  assert.ok(buildRoleplayDirectives({ dialogueRatio: 'low' }).includes('DIALOGUE RATIO — LOW'));
+  assert.ok(buildRoleplayDirectives({ pacing: 'slow' }).includes('PACING — SLOW'));
+  assert.ok(buildRoleplayDirectives({ pacing: 'fast' }).includes('PACING — FAST'));
+  assert.equal(buildRoleplayDirectives({ pacing: 'normal' }), undefined);
+});
+
+test('boolean toggles each add their own directive', () => {
+  const text = buildRoleplayDirectives({ varyOpeners: true, realism: true, continuity: true, proactive: true });
+  for (const s of ['VARIETY', 'REALISM', 'CONTINUITY', 'PROACTIVE CHARACTERS']) {
+    assert.ok(text.includes(s), s);
+  }
+});
+
+test('banter drops dialogue ratio but keeps pacing/proactive', () => {
+  const text = buildRoleplayDirectives({ responseLength: 'banter', dialogueRatio: 'low', pacing: 'slow', proactive: true });
+  assert.ok(!text.includes('DIALOGUE RATIO'));
+  assert.ok(text.includes('PACING — SLOW'));
+  assert.ok(text.includes('PROACTIVE'));
+});
+
+test('new inline tags parse, strip, and override cfg', () => {
+  const { commands, messages } = extractInlineCommands([
+    {
+      role: 'system',
+      content:
+        'A\n<DIALOGUE_RATIO=HIGH>\n<PACING:slow>\n<VARY_OPENERS=true>\n<REALISM=on>\n<CONTINUITY=1>\n<PROACTIVE=true>\nB',
+    },
+  ]);
+  assert.equal(messages[0].content, 'A\nB');
+  assert.deepEqual(commands, {
+    dialogueRatio: 'high',
+    pacing: 'slow',
+    varyOpeners: true,
+    realism: true,
+    continuity: true,
+    proactive: true,
+  });
+  const { cfg } = applyInlineCommands({ pacing: 'fast', proactive: false }, {}, commands);
+  assert.equal(cfg.pacing, 'slow');
+  assert.equal(cfg.proactive, true);
+});
+
+test('<PACING=normal> overrides a Railway-level slow to nothing', () => {
+  const { commands } = extractInlineCommands([{ role: 'system', content: '<PACING=normal>' }]);
+  const { cfg } = applyInlineCommands({ pacing: 'slow' }, {}, commands);
+  assert.equal(buildRoleplayDirectives(cfg), undefined);
+});
