@@ -3,6 +3,7 @@ import { config } from '../config.js';
 import { applyGenerationDefaults, resolveThinkingConfig, extractParts } from '../lib/generationDefaults.js';
 import { extractInlineCommands, applyInlineCommands } from '../lib/inlineCommands.js';
 import { applyRoleplayTricks, friendlyErrorMessage } from '../lib/roleplayTricks.js';
+import { buildRoleplayDirectives, mergeSystemInstruction } from '../lib/roleplayPrompts.js';
 import { fetchWithRetry } from '../lib/upstreamFetch.js';
 import { createLineQueue, LineTimeoutError } from '../lib/lineQueue.js';
 import { getCandidateKeys, isKeyExhaustionError, markKeyExhausted, markKeySuccess, maskKey } from '../lib/keyManager.js';
@@ -86,12 +87,12 @@ function toGeminiContents(messages = []) {
   }
 
   if (!contents.length) {
-  contents.push({ role: 'user', parts: [{ text: '.' }] });
-} else if (contents[contents.length - 1].role !== 'user') {
-  contents.push({ role: 'user', parts: [{ text: '.' }] });
-}
+    contents.push({ role: 'user', parts: [{ text: '.' }] });
+  } else if (contents[contents.length - 1].role !== 'user') {
+    contents.push({ role: 'user', parts: [{ text: '.' }] });
+  }
 
-return { contents };
+  return { contents };
 }
 
 function toGenerationConfig(body) {
@@ -175,8 +176,9 @@ router.post('/v1beta/openai/chat/completions', async (req, res, next) => {
     model = body.model || 'gemini-flash-latest';
 
     // In-chat <ENABLE_THINKING=...>/<REASONING_EFFORT=...>/<SHOW_REASONING=...>
-    // tags, wherever they show up in the incoming messages (typically
-    // Janitor's own "Custom Prompt" field) — see lib/inlineCommands.js.
+    // and roleplay style tags (<RESPONSE_LENGTH=...>, <NO_AISM=...>, ...),
+    // wherever they show up in the incoming messages (typically Janitor's
+    // own "Custom Prompt" field) — see lib/inlineCommands.js.
     // Tags are stripped from the text before anything else touches it.
     const { commands, messages: taggedMessages } = extractInlineCommands(body.messages || []);
     const { cfg: effectiveConfig, body: effectiveBody } = applyInlineCommands(config, body, commands);
@@ -188,7 +190,13 @@ router.post('/v1beta/openai/chat/completions', async (req, res, next) => {
     const thinkingConfig = resolveThinkingConfig(model, effectiveBody, effectiveConfig);
     if (thinkingConfig) generationConfig.thinkingConfig = thinkingConfig;
 
-    const systemInstruction = buildSystemInstruction(config);
+    // Base framing text + the toggleable roleplay style directives
+    // (response length, no-AI-isms, markdown, narration, living world,
+    // realistic texting) — see lib/roleplayPrompts.js.
+    const systemInstruction = mergeSystemInstruction(
+      buildSystemInstruction(config),
+      buildRoleplayDirectives(effectiveConfig)
+    );
     const geminiBody = {
       contents,
       generationConfig,
