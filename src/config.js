@@ -1,5 +1,11 @@
 import 'dotenv/config';
-import { RESPONSE_LENGTHS, NARRATION_MODES, normalizeChoice } from './lib/roleplayPrompts.js';
+import {
+  RESPONSE_LENGTHS,
+  NARRATION_MODES,
+  DIALOGUE_RATIOS,
+  PACINGS,
+  normalizeChoice,
+} from './lib/roleplayPrompts.js';
 
 function optionalNumber(name) {
   return process.env[name] !== undefined ? Number(process.env[name]) : undefined;
@@ -201,4 +207,16 @@ export const config = {
   livingWorld: process.env.LIVING_WORLD === 'true',
   // Texts written the way each character would really type them.
   realTexting: process.env.REAL_TEXTING === 'true',
+  // low | medium | high — how much of a reply is spoken dialogue.
+  dialogueRatio: normalizeChoice(process.env.DIALOGUE_RATIO, DIALOGUE_RATIOS),
+  // slow | normal | fast. 'normal' adds nothing (model default).
+  pacing: normalizeChoice(process.env.PACING, PACINGS),
+  // Never open consecutive replies the same way or reuse earlier phrasing.
+  varyOpeners: process.env.VARY_OPENERS === 'true',
+  // Consequences, limited knowledge, realistic rules.
+  realism: process.env.REALISM === 'true',
+  // Track and honor established details; never contradict earlier facts.
+  continuity: process.env.CONTINUITY === 'true',
+  // Characters/NPCs drive the plot instead of waiting on the user.
+  proactive: process.env.PROACTIVE === 'true',
 };
