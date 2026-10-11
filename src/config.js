@@ -189,6 +189,26 @@ export const config = {
   // real-world facts/grounding.
   enableGoogleSearch: process.env.ENABLE_GOOGLE_SEARCH === 'true',
 
+  // --- Image reading (see lib/imageReader.js) ----------------------------
+  // READ_IMAGE=true makes the proxy download Janitor media-library links
+  // (e.g. ![image](https://ella.janitorai.com/media-approved/abc.webp)) found
+  // in the chat and hand the pictures to Gemini. Off by default. Can also be
+  // flipped per chat with <READ_IMAGE=true|false>.
+  readImage: process.env.READ_IMAGE === 'true',
+  // Only these hosts / this path prefix are ever fetched.
+  readImageHosts: (process.env.READ_IMAGE_HOSTS || 'ella.janitorai.com')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean),
+  readImagePathPrefix: process.env.READ_IMAGE_PATH_PREFIX || '/media-approved/',
+  // At most this many images (the most recent ones) are sent per request.
+  readImageMax: Number(process.env.READ_IMAGE_MAX || 4),
+  // Per-image size cap, bytes. Default 5 MB.
+  readImageMaxBytes: Number(process.env.READ_IMAGE_MAX_BYTES || 5 * 1024 * 1024),
+  readImageTimeoutMs: Number(process.env.READ_IMAGE_TIMEOUT_MS || 10_000),
+  // Size of the in-memory download cache (base64 bytes). Default 50 MB.
+  readImageCacheBytes: Number(process.env.READ_IMAGE_CACHE_BYTES || 50 * 1024 * 1024),
+
   // --- Roleplay style prompts (see lib/roleplayPrompts.js) ---------------
   // All OFF/unset by default. Each adds a short directive block to Gemini's
   // systemInstruction. Every one can also be overridden per-chat with an
