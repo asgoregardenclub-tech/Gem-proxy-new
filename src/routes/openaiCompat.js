@@ -8,6 +8,7 @@ import { fetchWithRetry } from '../lib/upstreamFetch.js';
 import { createLineQueue, LineTimeoutError } from '../lib/lineQueue.js';
 import { getCandidateKeys, isKeyExhaustionError, markKeyExhausted, markKeySuccess, maskKey } from '../lib/keyManager.js';
 import { logGeminiRequest } from '../lib/requestLog.js';
+import { attachImages } from '../lib/imageReader.js';
 import {
   buildSafetySettings,
   buildSystemInstruction,
@@ -35,6 +36,12 @@ function flattenContent(content) {
       .map((part) => {
         if (typeof part === 'string') return part;
         if (part && typeof part.text === 'string') return part.text;
+        // OpenAI-style image part -> markdown, so the READ_IMAGE step later
+        // sees it exactly like a pasted ![image](url) link.
+        if (part?.type === 'image_url') {
+          const url = typeof part.image_url === 'string' ? part.image_url : part.image_url?.url;
+          if (typeof url === 'string' && url) return `![image](${url})`;
+        }
         return '';
       })
       .filter(Boolean)
@@ -184,7 +191,20 @@ router.post('/v1beta/openai/chat/completions', async (req, res, next) => {
     const { cfg: effectiveConfig, body: effectiveBody } = applyInlineCommands(config, body, commands);
 
     const messages = applyRoleplayTricks(taggedMessages, effectiveConfig);
-    const { contents } = toGeminiContents(messages);
+    const { contents: textContents } = toGeminiContents(messages);
+
+    // READ_IMAGE: swap Janitor media-library links for real image data so
+    // Gemini can see them. Runs on the FINAL contents (after the roleplay
+    // tricks), and never fails the request — a bad link just becomes a note.
+    let contents = textContents;
+    if (effectiveConfig.readImage) {
+      const result = await attachImages(textContents, effectiveConfig);
+      contents = result.contents;
+      if (result.stats.found) {
+        const { found, attached, failed, skipped } = result.stats;
+        console.log(`[read_image] found=${found} attached=${attached} failed=${failed} skipped=${skipped}`);
+      }
+    }
 
     const generationConfig = toGenerationConfig(body);
     const thinkingConfig = resolveThinkingConfig(model, effectiveBody, effectiveConfig);
