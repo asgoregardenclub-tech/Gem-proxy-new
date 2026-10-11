@@ -30,6 +30,8 @@
 //   <CONTINUITY=true|false>
 //   <PROACTIVE=true|false>
 //
+//   <READ_IMAGE=true|false>   (let Gemini see Janitor media-library images)
+//
 // Every matched tag (plus the whitespace/newline immediately around it) is
 // removed from the message text before anything else touches it — none of
 // this is meant to be visible to the model.
@@ -69,6 +71,7 @@ const TAG_DEFS = [
   { key: 'realism', pattern: tagPattern('REALISM', BOOL_ALT), parse: boolParse },
   { key: 'continuity', pattern: tagPattern('CONTINUITY', BOOL_ALT), parse: boolParse },
   { key: 'proactive', pattern: tagPattern('PROACTIVE', BOOL_ALT), parse: boolParse },
+  { key: 'readImage', pattern: tagPattern('READ_IMAGE', BOOL_ALT), parse: boolParse },
 ];
 
 // Keys that map straight onto cfg fields of the same name.
@@ -86,6 +89,7 @@ const CFG_KEYS = [
   'realism',
   'continuity',
   'proactive',
+  'readImage',
 ];
 
 // Runs every tag pattern over one string, recording the LAST value seen for
