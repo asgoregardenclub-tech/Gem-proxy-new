@@ -9,6 +9,7 @@ import { createLineQueue, LineTimeoutError } from '../lib/lineQueue.js';
 import { getCandidateKeys, isKeyExhaustionError, markKeyExhausted, markKeySuccess, maskKey } from '../lib/keyManager.js';
 import { logGeminiRequest } from '../lib/requestLog.js';
 import { attachImages } from '../lib/imageReader.js';
+import { getVertexToken } from '../lib/vertexAuth.js';
 import {
   buildSafetySettings,
   buildSystemInstruction,
@@ -21,13 +22,11 @@ import {
 
 const router = express.Router();
 
-// One shared line per model (only consulted when LINE_WAITING=true).
 const lineQueue = createLineQueue({
   baseDelayMs: config.lineBaseDelayMs,
   maxDelayMs: config.lineMaxDelayMs,
   staggerMs: config.lineStaggerMs,
 });
-
 
 function flattenContent(content) {
   if (typeof content === 'string') return content;
@@ -36,8 +35,6 @@ function flattenContent(content) {
       .map((part) => {
         if (typeof part === 'string') return part;
         if (part && typeof part.text === 'string') return part.text;
-        // OpenAI-style image part -> markdown, so the READ_IMAGE step later
-        // sees it exactly like a pasted ![image](url) link.
         if (part?.type === 'image_url') {
           const url = typeof part.image_url === 'string' ? part.image_url : part.image_url?.url;
           if (typeof url === 'string' && url) return `![image](${url})`;
@@ -108,20 +105,11 @@ function toGenerationConfig(body) {
   if (body.top_p !== undefined) cfg.topP = body.top_p;
   if (body.top_k !== undefined) cfg.topK = body.top_k;
   if (body.max_tokens !== undefined) cfg.maxOutputTokens = body.max_tokens;
-  // frequency_penalty: discourages a token proportional to how many times
-  // it's already appeared. presence_penalty: flat discouragement for any
-  // token that's appeared at all, regardless of count — this is what most
-  // roleplay frontends (Janitor included) label "Repetition Penalty".
-  // Gemini's generationConfig takes both directly under these names.
   if (body.frequency_penalty !== undefined) cfg.frequencyPenalty = body.frequency_penalty;
   if (body.presence_penalty !== undefined) cfg.presencePenalty = body.presence_penalty;
   if (body.stop !== undefined) {
     cfg.stopSequences = Array.isArray(body.stop) ? body.stop : [body.stop];
   }
-  // seed is intentionally dropped — never forwarded to Gemini, regardless
-  // of what the client sends. A pinned seed makes Gemini reproduce
-  // (near-)identical output for the same context on every call, which
-  // flattens variety on regenerates/swipes instead of helping.
   if (body.n !== undefined) cfg.candidateCount = body.n;
   return cfg;
 }
@@ -142,25 +130,36 @@ function openaiChunk({ completionId, createdTs, model, deltaText, finishReason }
   })}\n\n`;
 }
 
-router.post('/v1beta/openai/chat/completions', async (req, res, next) => {
+// Handlers for both standard OpenAI paths and Gemini beta path
+const COMPLETION_ROUTES = [
+  '/v1beta/openai/chat/completions',
+  '/v1/chat/completions',
+  '/chat/completions',
+];
+
+router.get(['/v1/models', '/models'], (req, res) => {
+  res.json({
+    object: 'list',
+    data: [
+      { id: 'gemini-4-argon', object: 'model', owned_by: 'google' },
+      { id: 'gemini-2.5-flash', object: 'model', owned_by: 'google' },
+      { id: 'gemini-2.5-pro', object: 'model', owned_by: 'google' },
+    ],
+  });
+});
+
+router.post(COMPLETION_ROUTES, async (req, res, next) => {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), config.requestTimeoutMs);
   const startedAt = Date.now();
-  // Hoisted above the try (rather than left as const inside it) so the
-  // catch block — the timeout/AbortError case — still knows what model and
-  // stream mode the log line is for.
   let model = 'unknown';
   let wantsStream = false;
-  // Hoisted so the catch block can stop it too.
   let keepAlive;
   const stopKeepAlive = () => {
     clearInterval(keepAlive);
     keepAlive = undefined;
   };
 
-  // Once we've started an SSE response (to keep the client connection alive
-  // while waiting in line) we can no longer send an HTTP error status, so
-  // errors have to go out as a final chunk in the stream instead.
   function sendError(status, message) {
     stopKeepAlive();
     if (res.destroyed) return;
@@ -182,20 +181,12 @@ router.post('/v1beta/openai/chat/completions', async (req, res, next) => {
     const body = applyGenerationDefaults(req.body || {});
     model = body.model || 'gemini-flash-latest';
 
-    // In-chat <ENABLE_THINKING=...>/<REASONING_EFFORT=...>/<SHOW_REASONING=...>
-    // and roleplay style tags (<RESPONSE_LENGTH=...>, <NO_AISM=...>, ...),
-    // wherever they show up in the incoming messages (typically Janitor's
-    // own "Custom Prompt" field) — see lib/inlineCommands.js.
-    // Tags are stripped from the text before anything else touches it.
     const { commands, messages: taggedMessages } = extractInlineCommands(body.messages || []);
     const { cfg: effectiveConfig, body: effectiveBody } = applyInlineCommands(config, body, commands);
 
     const messages = applyRoleplayTricks(taggedMessages, effectiveConfig);
     const { contents: textContents } = toGeminiContents(messages);
 
-    // READ_IMAGE: swap Janitor media-library links for real image data so
-    // Gemini can see them. Runs on the FINAL contents (after the roleplay
-    // tricks), and never fails the request — a bad link just becomes a note.
     let contents = textContents;
     if (effectiveConfig.readImage) {
       const result = await attachImages(textContents, effectiveConfig);
@@ -210,9 +201,6 @@ router.post('/v1beta/openai/chat/completions', async (req, res, next) => {
     const thinkingConfig = resolveThinkingConfig(model, effectiveBody, effectiveConfig);
     if (thinkingConfig) generationConfig.thinkingConfig = thinkingConfig;
 
-    // Base framing text + the toggleable roleplay style directives
-    // (response length, no-AI-isms, markdown, narration, living world,
-    // realistic texting) — see lib/roleplayPrompts.js.
     const systemInstruction = mergeSystemInstruction(
       buildSystemInstruction(config),
       buildRoleplayDirectives(effectiveConfig)
@@ -227,22 +215,39 @@ router.post('/v1beta/openai/chat/completions', async (req, res, next) => {
 
     wantsStream = Boolean(body.stream);
     const method = wantsStream ? 'streamGenerateContent' : 'generateContent';
-    const targetUrl = new URL(
-      `/v1beta/models/${model}:${method}${wantsStream ? '?alt=sse' : ''}`,
-      config.geminiBaseUrl
-    );
 
+    // Route to Vertex AI if GCP_SERVICE_ACCOUNT_KEY is configured OR model is an Argon model
+    const isVertex = Boolean(config.gcpServiceAccount) || model.includes('argon');
+
+    let targetUrl;
     const headers = new Headers({ 'content-type': 'application/json' });
 
-    // Multi-key rotation (see lib/keyManager.js). With only one key
-    // configured this is a single iteration — same request as before.
-    // getCandidateKeys reorders req.geminiApiKeys itself (sticky "last
-    // known good" key first, exhausted ones pushed to the back), so we
-    // just walk the list it hands back.
-    const keyList = req.geminiApiKeys?.length ? req.geminiApiKeys : req.geminiApiKey ? [req.geminiApiKey] : [];
-    const candidateKeys = getCandidateKeys(keyList);
+    if (isVertex && config.gcpServiceAccount) {
+      const sa =
+        typeof config.gcpServiceAccount === 'string'
+          ? JSON.parse(config.gcpServiceAccount)
+          : config.gcpServiceAccount;
 
-    if (candidateKeys.length === 0) {
+      const projectId = sa.project_id;
+      const location = config.gcpRegion || 'global';
+
+      targetUrl = new URL(
+        `https://aiplatform.googleapis.com/v1/projects/${projectId}/locations/${location}/publishers/google/models/${model}:${method}${wantsStream ? '?alt=sse' : ''}`
+      );
+
+      const token = await getVertexToken(sa);
+      headers.set('authorization', `Bearer ${token}`);
+    } else {
+      targetUrl = new URL(
+        `/v1beta/models/${model}:${method}${wantsStream ? '?alt=sse' : ''}`,
+        config.geminiBaseUrl
+      );
+    }
+
+    const keyList = req.geminiApiKeys?.length ? req.geminiApiKeys : req.geminiApiKey ? [req.geminiApiKey] : [];
+    const candidateKeys = isVertex ? ['vertex-token'] : getCandidateKeys(keyList);
+
+    if (!isVertex && candidateKeys.length === 0) {
       clearTimeout(timeoutId);
       return res.status(401).json({ error: { message: 'No Gemini API key available for this request.' } });
     }
@@ -251,25 +256,17 @@ router.post('/v1beta/openai/chat/completions', async (req, res, next) => {
     let errText;
     let parsedError;
 
-    // --- "Waiting in line" (LINE_WAITING=true, see lib/lineQueue.js) ------
-    // The key-rotation loop below runs once per turn in line. Healthy model:
-    // one turn, straight through. 503: take our place at the front of the
-    // line and wait for the next turn instead of retrying/returning.
     const lineOn = config.lineWaiting;
     const lineDeadline = Date.now() + config.lineMaxWaitMs;
     let lineTurns = 0;
     let lineGaveUp = false;
 
     if (lineOn) {
-      // A client that hangs up while waiting must not leave a ghost request
-      // behind that later fires and burns quota for nobody.
       res.on('close', () => {
         if (!res.writableEnded) controller.abort();
       });
     }
 
-    // Streaming clients: open the SSE response now and send comment lines
-    // while waiting, so the connection isn't dropped as idle.
     function startKeepAlive() {
       if (!wantsStream || keepAlive || res.destroyed) return;
       if (!res.headersSent) {
@@ -285,14 +282,12 @@ router.post('/v1beta/openai/chat/completions', async (req, res, next) => {
     while (true) {
       let ticket;
       if (lineOn) {
-        // Model already known to be overloaded (or we just got a 503):
-        // we're about to wait, so start the keep-alive first.
         if (lineTurns > 0 || lineQueue.snapshot(model).failures > 0) startKeepAlive();
         try {
           ticket = await lineQueue.joinLine(model, {
             signal: controller.signal,
             deadline: lineDeadline,
-            front: lineTurns > 0, // keep our place: we've been waiting longest
+            front: lineTurns > 0,
           });
         } catch (err) {
           if (err instanceof LineTimeoutError) {
@@ -310,7 +305,9 @@ router.post('/v1beta/openai/chat/completions', async (req, res, next) => {
       try {
         for (let attempt = 0; attempt < candidateKeys.length; attempt++) {
           const key = candidateKeys[attempt];
-          headers.set('x-goog-api-key', key);
+          if (!isVertex) {
+            headers.set('x-goog-api-key', key);
+          }
 
           upstream = await fetchWithRetry(
             targetUrl,
@@ -324,7 +321,7 @@ router.post('/v1beta/openai/chat/completions', async (req, res, next) => {
           );
 
           if (upstream.ok) {
-            markKeySuccess(key, keyList);
+            if (!isVertex) markKeySuccess(key, keyList);
             break;
           }
 
@@ -333,15 +330,11 @@ router.post('/v1beta/openai/chat/completions', async (req, res, next) => {
           try {
             parsedError = JSON.parse(errText)?.error;
           } catch {
-            // errText wasn't JSON — use it as-is further down.
+            // Not JSON
           }
 
           const isLastCandidate = attempt === candidateKeys.length - 1;
-          if (!isLastCandidate && isKeyExhaustionError(upstream.status, parsedError, errText)) {
-            // A truly dead/revoked key (UNAUTHENTICATED / "API key not
-            // valid") is never coming back on its own — leave it out of
-            // rotation far longer than a merely rate-limited/quota-exhausted
-            // one, which resets on its own before long.
+          if (!isVertex && !isLastCandidate && isKeyExhaustionError(upstream.status, parsedError, errText)) {
             const looksPermanentlyDead =
               parsedError?.status === 'UNAUTHENTICATED' ||
               /api key not valid|api_key_invalid|api key expired/i.test(parsedError?.message || errText || '');
@@ -423,9 +416,6 @@ router.post('/v1beta/openai/chat/completions', async (req, res, next) => {
         durationMs: Date.now() - startedAt,
       });
 
-      // Empty + policy/safety block used to come back as HTTP 200 with
-      // finish_reason "stop" and blank content — Janitor just showed an
-      // empty swipe. Surface it as a real error instead.
       if (!hasVisibleText(content, reasoning) && isContentFilterReason(blockReason)) {
         return res.status(400).json(contentFilterError(blockReason));
       }
@@ -449,7 +439,7 @@ router.post('/v1beta/openai/chat/completions', async (req, res, next) => {
       });
     }
 
-    // Streaming: re-emit Gemini's native SSE chunks as OpenAI-style chunks.
+    // Streaming response
     if (!res.headersSent) {
       res.setHeader('content-type', 'text/event-stream');
       res.setHeader('cache-control', 'no-cache');
@@ -457,22 +447,9 @@ router.post('/v1beta/openai/chat/completions', async (req, res, next) => {
     }
 
     let buffer = '';
-    // Thinking spans multiple SSE chunks, so opening/closing the tag inside
-    // the per-chunk handler (the previous behavior) produced one
-    // <think>...</think> pair PER CHUNK instead of one pair for the whole
-    // reasoning block. Tracking open/closed state across the whole stream
-    // fixes that: the tag opens exactly once, right before the first
-    // reasoning token, and closes exactly once, right before the first
-    // visible content token (or right before finish, if the model finished
-    // without ever producing visible content).
     let thinkOpen = false;
     let thinkClosed = false;
-    // Gemini includes usageMetadata on streamed chunks with running totals —
-    // overwriting on every chunk means whatever's here when the stream ends
-    // is the final, complete count.
     let usage;
-    // Gemini's own finishReason (MAX_TOKENS / SAFETY / RECITATION / STOP),
-    // captured from whichever chunk carries it — normally only the last one.
     let lastFinishReason;
     let lastPromptBlockReason;
     let hadVisibleContent = false;
@@ -496,11 +473,6 @@ router.post('/v1beta/openai/chat/completions', async (req, res, next) => {
       return text;
     }
 
-    // Handles one raw line from the SSE stream. Pulled out to a named
-    // function because it needs to run in two places: once per complete
-    // line as they arrive, and ONE MORE TIME after the read loop ends, on
-    // whatever's left in `buffer` — see the comment above the loop for why
-    // that second call matters.
     function processSseLine(line) {
       const trimmed = line.trim();
       if (!trimmed.startsWith('data:')) return;
@@ -537,7 +509,7 @@ router.post('/v1beta/openai/chat/completions', async (req, res, next) => {
           })
         );
       } catch {
-        // Skip a malformed chunk rather than crashing the whole stream.
+        // Skip malformed chunk
       }
     }
 
@@ -546,18 +518,6 @@ router.post('/v1beta/openai/chat/completions', async (req, res, next) => {
 
     req.on('close', () => reader.cancel().catch(() => {}));
 
-    // A `read()` that returns done:true is only guaranteed to mean "no more
-    // BYTES are coming" — it says nothing about whether `buffer` still holds
-    // a complete-but-unterminated line. SSE events are meant to end with a
-    // blank line, but if the upstream connection closes right after the
-    // final event's data (no trailing newline flushed before the socket
-    // closes — which is exactly the kind of thing an abrupt mid-stream
-    // disconnect causes), that whole trailing chunk sat in `buffer`,
-    // waiting for a newline that was never coming, and previously got
-    // silently discarded the moment the loop exited. That chunk is very
-    // often the one carrying finishReason — which is exactly why a cutoff
-    // stream could show a completely empty `finishReason=` in the logs:
-    // not because Gemini didn't say why, but because we never looked.
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
@@ -570,9 +530,7 @@ router.post('/v1beta/openai/chat/completions', async (req, res, next) => {
         processSseLine(line);
       }
     }
-    // Flush the decoder (in case a multi-byte UTF-8 character was split
-    // across the last two reads) and process whatever's left in `buffer` —
-    // the fix described above.
+
     buffer += decoder.decode();
     if (buffer.trim()) {
       processSseLine(buffer);
@@ -598,12 +556,6 @@ router.post('/v1beta/openai/chat/completions', async (req, res, next) => {
       model,
       stream: true,
       status: 200,
-      // If the stream ended and we STILL never saw a finishReason (even
-      // after the flush above), that's worth knowing on its own — it means
-      // the upstream connection was cut before Gemini ever sent a proper
-      // terminal event, rather than Gemini deciding to stop for a reason we
-      // just failed to log. Distinct from every real Gemini finishReason
-      // value, so it's unambiguous in the logs.
       finishReason: lastFinishReason ?? lastPromptBlockReason ?? 'STREAM_CLOSED_WITHOUT_FINISH_REASON',
       promptBlockReason: lastPromptBlockReason,
       promptTokens: usage?.promptTokenCount,
@@ -614,7 +566,7 @@ router.post('/v1beta/openai/chat/completions', async (req, res, next) => {
   } catch (err) {
     clearTimeout(timeoutId);
     stopKeepAlive();
-    if (res.destroyed) return; // client already gone (e.g. hung up while waiting in line)
+    if (res.destroyed) return;
     if (err.name === 'AbortError') {
       logGeminiRequest({
         model,
