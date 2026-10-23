@@ -15,40 +15,19 @@ export const config = {
   port: process.env.PORT || 8080,
   nodeEnv: process.env.NODE_ENV || 'production',
 
-  // --- API key handling ------------------------------------------------
-  // Both are now OPTIONAL. Nothing has to be set in Railway at all — see
-  // middleware/auth.js for the three supported modes (pure bring-your-own-
-  // key, password substitution, and local-testing fallback).
-  //
-  // geminiApiKey: only used as a fallback when the caller doesn't send a
-  // key of their own (local curl testing) or as the real key that
-  // proxyApiKey substitutes in for ("password mode").
-  // Either of these — GEMINI_API_KEY here, or whatever's typed into
-  // Janitor's own key field — may be a SINGLE key or a comma-separated
-  // LIST of keys. With more than one key, see lib/keyManager.js: a
-  // request that hits a dead/rate-limited/quota-exhausted key
-  // automatically rotates to the next one before anything reaches
-  // Janitor, instead of just failing.
+  // --- API key & Vertex handling -----------------------------------------
   geminiApiKey: process.env.GEMINI_API_KEY || undefined,
-  // proxyApiKey: an optional "password" you can hand out instead of your
-  // real Gemini key. Only meaningful if geminiApiKey is also set.
   proxyApiKey: process.env.PROXY_API_KEY || undefined,
   geminiBaseUrl: process.env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com',
 
-  // How long a key sits out of rotation after a TRANSIENT failure (429 /
-  // quota / RESOURCE_EXHAUSTED) before being tried again. Only matters
-  // when more than one key is configured — see lib/keyManager.js.
+  // Vertex AI / Google Cloud configuration ($300 GCP free quota)
+  gcpServiceAccount: process.env.GCP_SERVICE_ACCOUNT_KEY || undefined,
+  gcpRegion: process.env.GCP_REGION || 'global',
+
+  // How long a key sits out of rotation after a transient error
   keyCooldownMs: Number(process.env.KEY_COOLDOWN_MS || 60_000),
-  // How long a key sits out after looking PERMANENTLY dead (invalid,
-  // revoked, UNAUTHENTICATED) — much longer than the above, since
-  // retrying a truly bad key on every request just wastes an attempt.
-  // Still not infinite, in case e.g. billing gets fixed without a
-  // redeploy. Defaults to 24h.
   keyInvalidCooldownMs: Number(process.env.KEY_INVALID_COOLDOWN_MS || 24 * 60 * 60_000),
 
-  // Per-category Gemini safety thresholds.
-  // HARM_CATEGORY_JAILBREAK is deliberately NOT sent — that classifier is
-  // off unless the category is present on the request.
   safetyThresholds: {
     harassment: 'BLOCK_NONE',
     hateSpeech: 'BLOCK_NONE',
@@ -56,9 +35,6 @@ export const config = {
     dangerousContent: 'BLOCK_NONE',
   },
 
-  // Short Gemini-native systemInstruction: fictional writing + every
-  // character is 18+. Age disambiguation only, not a jailbreak. Disable
-  // with ENABLE_ADULT_FRAMING=false. Override the text with ADULT_FRAMING_TEXT.
   enableAdultFraming: process.env.ENABLE_ADULT_FRAMING !== 'false',
   adultFramingText: process.env.ADULT_FRAMING_TEXT || undefined,
 
@@ -67,176 +43,65 @@ export const config = {
     .map((s) => s.trim())
     .filter(Boolean),
 
-  // Per-IP request cap. Raised well above the original defaults (30/min)
-  // since a single interactive roleplay session can easily fire off many
-  // requests a minute (regenerates, swipes, streaming reconnects). This
-  // only guards against a runaway loop/bug — it does not raise your
-  // actual Gemini quota.
   rateLimitWindowMs: Number(process.env.RATE_LIMIT_WINDOW_MS || 60_000),
   rateLimitMax: Number(process.env.RATE_LIMIT_MAX || 180),
-
-  // How long to wait for Gemini to start responding before giving up.
   requestTimeoutMs: Number(process.env.REQUEST_TIMEOUT_MS || 600_000),
 
-  // Transient-error retry (500 overloaded / 503 overloaded / 504). See
-  // lib/upstreamFetch.js. Defaults to 1 — i.e. OFF, single attempt, no
-  // retry — so a failed request always surfaces immediately instead of
-  // silently resending the (often large, roleplay-context-sized) body.
-  // Set RETRY_ATTEMPTS above 1 if you'd rather the proxy retry transient
-  // errors for you.
   retryAttempts: Number(process.env.RETRY_ATTEMPTS || 1),
   retryBaseDelayMs: Number(process.env.RETRY_BASE_DELAY_MS || 500),
 
-  // --- "Waiting in line" for overloaded models (see lib/lineQueue.js) ----
-  // When true, a 503 from Gemini is NOT retried blindly and NOT returned to
-  // the client. The request waits in a per-model line instead; only one
-  // request at a time (the head of the line) re-tries, at a growing
-  // interval, so waiting costs ONE request per interval for everybody
-  // instead of one per retry per user. While this is on, RETRY_ATTEMPTS /
-  // RETRY_BASE_DELAY_MS are ignored. Off by default.
+  // Waiting in line (LINE_WAITING)
   lineWaiting: process.env.LINE_WAITING === 'true',
-  // Upstream statuses that count as "overloaded -> go wait in line".
-  // Comma-separated. Default: just 503. (e.g. LINE_STATUSES=503,500)
   lineStatuses: new Set(
     (process.env.LINE_STATUSES || '503')
       .split(',')
       .map((s) => Number(s.trim()))
       .filter(Boolean)
   ),
-  // Delay before the first re-try after a 503, doubling on each further
-  // 503 up to LINE_MAX_DELAY_MS. Higher = fewer wasted requests, slower
-  // pickup once the model recovers.
   lineBaseDelayMs: Number(process.env.LINE_BASE_DELAY_MS || 10_000),
   lineMaxDelayMs: Number(process.env.LINE_MAX_DELAY_MS || 60_000),
-  // Total time one request is willing to wait in line before it gives up
-  // and returns a 503 to the client. Keep below REQUEST_TIMEOUT_MS.
   lineMaxWaitMs: Number(process.env.LINE_MAX_WAIT_MS || 300_000),
-  // Gap between releasing queued requests once the model recovers, so a
-  // crowd doesn't hit it all at once and bring the 503s straight back.
   lineStaggerMs: Number(process.env.LINE_STAGGER_MS || 1_500),
-  // Streaming clients get an SSE comment this often while waiting so the
-  // connection isn't dropped as idle.
   lineKeepaliveMs: Number(process.env.LINE_KEEPALIVE_MS || 15_000),
 
-  // Applied ONLY when the client didn't already set the field itself.
   defaultTemperature: optionalNumber('DEFAULT_TEMPERATURE'),
   defaultTopP: optionalNumber('DEFAULT_TOP_P'),
-  // Frequency penalty (discourages tokens proportional to how often
-  // they've already appeared) and presence penalty (a.k.a. "repetition
-  // penalty" in most roleplay frontends — flat discouragement for any
-  // token that's appeared at all, regardless of count). Same "only if
-  // the client didn't already send one" rule; unset by default so
-  // Janitor's own sliders always win when it sends them.
   defaultFrequencyPenalty: optionalNumber('DEFAULT_FREQUENCY_PENALTY'),
   defaultPresencePenalty: optionalNumber('DEFAULT_PRESENCE_PENALTY'),
-  // 12000 out of the box — raise/lower with DEFAULT_MAX_TOKENS, or set
-  // max_tokens per-request from the client (Janitor) to override either way.
   defaultMaxTokens: optionalNumber('DEFAULT_MAX_TOKENS') ?? 12000,
-
-  // Hard ceiling — applied even if the client asks for more. Protects quota.
-  // Unset by default, i.e. no ceiling beyond what the client/model allow.
   maxTokensCap: optionalNumber('MAX_TOKENS_CAP'),
 
-  // Gemini "thinking" (extended reasoning) controls — applied only when the
-  // client didn't already ask for thinking itself on that request.
-
-  // Master switch. If false, we don't send a reasoning level/budget of our
-  // own at all — Gemini just uses whatever it defaults to for that model.
   enableThinking: process.env.ENABLE_THINKING === 'true',
-
-  // Only used when enableThinking is true. 'minimal' | 'low' | 'medium' | 'high'.
-  // On Gemini 3.x models (gemini-3-flash, gemini-3.6-flash, gemini-3.7-flash,
-  // ...) this is sent as-is (thinkingLevel).
-  // Note: gemini-3.7-flash and gemini-3.8-flash reject 'minimal' with a 400
-  // — use 'low' as the lightest setting if you're targeting those two.
-  // On the older Gemini 2.5 models, which don't understand levels, it's
-  // mapped to an approximate token budget instead (see EFFORT_TO_BUDGET in
-  // lib/generationDefaults.js).
   reasoningEffort: process.env.REASONING_EFFORT,
-
-  // Whether to ask Gemini for its thought summaries. Off by default.
-  // Independent of enableThinking — most current models still do some
-  // internal reasoning even without an explicit level set, so this can be
-  // turned on by itself if you just want to see what's happening under the
-  // hood. When on, thoughts are wrapped in <think></think> tags — kept out
-  // of the OpenAI-compat `reasoning_content`-style split and instead
-  // prepended straight onto the visible message, exactly as requested.
   showReasoning: process.env.SHOW_REASONING === 'true',
 
-  // --- Optional roleplay/jailbreak tricks (see lib/roleplayTricks.js) ---
-  // All OFF by default. Each changes how Gemini responds, so nothing here
-  // activates unless you explicitly set it in Railway/`.env`.
-
-  // Appends a trailing assistant turn asking Gemini to allow explicit/NSFW
-  // content and avoid refusal phrasing.
   enablePrefill: process.env.ENABLE_PREFILL === 'true',
-
-  // Appends a fake "(OOC: Continue?)" / "(OOC: Yes)" turn pair before
-  // generation — a continuation-priming trick to nudge past refusals.
   enableOocTrick: process.env.ENABLE_OOC_TRICK === 'true',
-
-  // Replaces every space in the conversation with an invisible Braille
-  // blank character (U+2800) to defeat keyword-based content filters.
-  // Changes the literal text Gemini sees on every turn — test before
-  // relying on it.
   enableBrailleTrick: process.env.ENABLE_BRAILLE_TRICK === 'true',
-
-  // Collapses the entire conversation into a single assistant-role turn
-  // formatted as a script (Name: line) instead of alternating turns.
   enableNoAss: process.env.ENABLE_NOASS === 'true',
-
-  // Gives Gemini a Google Search tool it can call mid-generation for
-  // real-world facts/grounding.
   enableGoogleSearch: process.env.ENABLE_GOOGLE_SEARCH === 'true',
 
-  // --- Image reading (see lib/imageReader.js) ----------------------------
-  // READ_IMAGE=true makes the proxy download Janitor media-library links
-  // (e.g. ![image](https://ella.janitorai.com/media-approved/abc.webp)) found
-  // in the chat and hand the pictures to Gemini. Off by default. Can also be
-  // flipped per chat with <READ_IMAGE=true|false>.
   readImage: process.env.READ_IMAGE === 'true',
-  // Only these hosts / this path prefix are ever fetched.
   readImageHosts: (process.env.READ_IMAGE_HOSTS || 'ella.janitorai.com')
     .split(',')
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean),
   readImagePathPrefix: process.env.READ_IMAGE_PATH_PREFIX || '/media-approved/',
-  // At most this many images (the most recent ones) are sent per request.
   readImageMax: Number(process.env.READ_IMAGE_MAX || 4),
-  // Per-image size cap, bytes. Default 5 MB.
   readImageMaxBytes: Number(process.env.READ_IMAGE_MAX_BYTES || 5 * 1024 * 1024),
   readImageTimeoutMs: Number(process.env.READ_IMAGE_TIMEOUT_MS || 10_000),
-  // Size of the in-memory download cache (base64 bytes). Default 50 MB.
   readImageCacheBytes: Number(process.env.READ_IMAGE_CACHE_BYTES || 50 * 1024 * 1024),
 
-  // --- Roleplay style prompts (see lib/roleplayPrompts.js) ---------------
-  // All OFF/unset by default. Each adds a short directive block to Gemini's
-  // systemInstruction. Every one can also be overridden per-chat with an
-  // inline tag (e.g. <RESPONSE_LENGTH=long>) — see lib/inlineCommands.js.
-
-  // banter | short | medium | long | novel. Anything else is ignored.
   responseLength: normalizeChoice(process.env.RESPONSE_LENGTH, RESPONSE_LENGTHS),
-  // Suppress stock AI-writing cliches.
   noAism: process.env.NO_AISM === 'true',
-  // Consistent markdown: "quotes" for speech, *italics* for narration,
-  // *(italic parens)* for inner monologue, `backticks` for texts, etc.
   forceMarkdown: process.env.FORCE_MARKDOWN === 'true',
-  // simple | professional. Anything else is ignored.
   narrationMode: normalizeChoice(process.env.NARRATION_MODE, NARRATION_MODES),
-  // NPCs have their own lives; crowds talk and bump into each other.
   livingWorld: process.env.LIVING_WORLD === 'true',
-  // Texts written the way each character would really type them.
   realTexting: process.env.REAL_TEXTING === 'true',
-  // low | medium | high — how much of a reply is spoken dialogue.
   dialogueRatio: normalizeChoice(process.env.DIALOGUE_RATIO, DIALOGUE_RATIOS),
-  // slow | normal | fast. 'normal' adds nothing (model default).
   pacing: normalizeChoice(process.env.PACING, PACINGS),
-  // Never open consecutive replies the same way or reuse earlier phrasing.
   varyOpeners: process.env.VARY_OPENERS === 'true',
-  // Consequences, limited knowledge, realistic rules.
   realism: process.env.REALISM === 'true',
-  // Track and honor established details; never contradict earlier facts.
   continuity: process.env.CONTINUITY === 'true',
-  // Characters/NPCs drive the plot instead of waiting on the user.
   proactive: process.env.PROACTIVE === 'true',
 };
