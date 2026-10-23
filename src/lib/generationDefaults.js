@@ -2,14 +2,7 @@ import { config } from '../config.js';
 
 // Applies config-level generation defaults (temperature / top_p /
 // max_tokens / frequency_penalty / presence_penalty) to an OpenAI-SHAPED
-// request body (flat top-level fields), but only for fields the client
-// didn't already set explicitly. Also enforces the hard maxTokensCap
-// regardless of whether the value came from the client or from
-// defaultMaxTokens. `seed` is intentionally never touched here — it's
-// dropped further downstream, see routes/openaiCompat.js's
-// toGenerationConfig.
-//
-// Used by routes/openaiCompat.js (OpenAI-compat translator).
+// request body, but only for fields the client didn't already set explicitly.
 export function applyGenerationDefaults(body) {
   if (!body || typeof body !== 'object') return body;
   const result = { ...body };
@@ -35,31 +28,20 @@ export function applyGenerationDefaults(body) {
   return result;
 }
 
-// --- Thinking config -------------------------------------------------------
-//
-// Gemini 2.5 models control reasoning depth with a numeric thinkingBudget
-// (token count; 0 = off, -1 = dynamic). Gemini 3.x models (gemini-3-flash,
-// gemini-3.1-flash-lite, gemini-3.5-flash, gemini-3.6-flash, gemini-3.7-flash,
-// gemini-3.8-flash, ...) replaced that with a discrete thinkingLevel instead:
-// 'minimal' | 'low' | 'medium' | 'high'. thinkingBudget is still accepted on
-// 3.x for backward compatibility, but Google recommends thinkingLevel there.
-//
-// Quirk worth knowing: gemini-3.7-flash and gemini-3.8-flash both reject
-// thinkingLevel: 'minimal' with a 400 error — 'low' is the lightest setting
-// that works on those two. gemini-3.6-flash and earlier 3.x models accept
-// 'minimal'.
-const GEMINI_3_MODEL = /^gemini-3(\.\d+)?(-|$)/;
+// Models that require thinkingLevel ('low'|'medium'|'high') rather than a numeric thinkingBudget:
+// Gemini 3.x, Gemini 4.x, and Argon series.
+const THINKING_LEVEL_MODEL = /^gemini-([3-9]|\d{2,})(\.\d+)?(-|$)|argon/i;
 
-export function isGemini3Model(model) {
-  return typeof model === 'string' && GEMINI_3_MODEL.test(model);
+export function isThinkingLevelModel(model) {
+  return typeof model === 'string' && THINKING_LEVEL_MODEL.test(model);
 }
+
+// Backward-compatibility alias
+export const isGemini3Model = isThinkingLevelModel;
 
 const THINKING_LEVELS = new Set(['minimal', 'low', 'medium', 'high']);
 
-// Approximate thinkingBudget (token count) equivalent for each effort level,
-// used only on Gemini 2.5 models — which predate thinkingLevel and only
-// understand a numeric budget. Gemini 3.x models get the REASONING_EFFORT
-// value sent directly as thinkingLevel instead, no mapping needed.
+// Approximate token budget for older Gemini 2.5 models
 const EFFORT_TO_BUDGET = {
   minimal: 0,
   low: 2048,
@@ -67,44 +49,48 @@ const EFFORT_TO_BUDGET = {
   high: 24576,
 };
 
-// Resolves the thinkingConfig object to send to Gemini for this request, or
-// undefined if thinking wasn't requested/configured at all (in which case
-// the model's own default behavior applies untouched).
-//
-// Precedence: an explicit per-request field on the body always wins over
-// config, regardless of ENABLE_THINKING — that switch only controls whether
-// OUR default kicks in when the client didn't ask for anything themselves.
-//   - body.reasoning_effort / body.thinking_level: 'minimal'|'low'|'medium'|'high'
-//     (OpenAI-style shorthand — matches OpenAI's own reasoning_effort
-//     naming, in case a client ever sends it)
-//   - body.thinking_budget: integer, used as-is regardless of model family
-//   - body.include_thoughts: boolean
+function budgetToLevel(budget) {
+  if (budget <= 0) return 'low';
+  if (budget <= 4096) return 'low';
+  if (budget <= 16384) return 'medium';
+  return 'high';
+}
+
 export function resolveThinkingConfig(model, body, cfg = config) {
   const requestedLevel = body?.reasoning_effort ?? body?.thinking_level;
   const requestedBudget = body?.thinking_budget;
   const requestedIncludeThoughts = body?.include_thoughts;
 
-  const level = THINKING_LEVELS.has(requestedLevel)
+  let level = THINKING_LEVELS.has(requestedLevel)
     ? requestedLevel
     : cfg.enableThinking
-    ? cfg.reasoningEffort
+    ? cfg.reasoningEffort || 'low'
     : undefined;
 
   const includeThoughts =
     requestedIncludeThoughts !== undefined ? Boolean(requestedIncludeThoughts) : cfg.showReasoning;
 
   const thinkingConfig = {};
+  const needsLevel = isThinkingLevelModel(model);
 
-  if (requestedBudget !== undefined) {
-    thinkingConfig.thinkingBudget = requestedBudget;
-  } else if (level) {
-    if (isGemini3Model(model)) {
-      thinkingConfig.thinkingLevel = level;
-    } else {
+  if (needsLevel) {
+    if (level || requestedBudget !== undefined) {
+      let effectiveLevel = level || budgetToLevel(requestedBudget);
+      // Models like 3.7+, 4.x, and Argon reject 'minimal' with a 400 error — use 'low' as floor
+      if (effectiveLevel === 'minimal' && /^gemini-(3\.[7-9]|4|argon)|\bargon\b/i.test(model)) {
+        effectiveLevel = 'low';
+      }
+      thinkingConfig.thinkingLevel = effectiveLevel;
+    }
+  } else {
+    if (requestedBudget !== undefined) {
+      thinkingConfig.thinkingBudget = requestedBudget;
+    } else if (level) {
       thinkingConfig.thinkingBudget = EFFORT_TO_BUDGET[level] ?? -1;
     }
   }
 
+  // Always enable thoughts extraction if requested or configured
   if (includeThoughts) {
     thinkingConfig.includeThoughts = true;
   }
@@ -112,11 +98,6 @@ export function resolveThinkingConfig(model, body, cfg = config) {
   return Object.keys(thinkingConfig).length ? thinkingConfig : undefined;
 }
 
-// Splits a Gemini candidate's parts into the visible answer and any thought
-// summaries (parts with thought: true, only present when includeThoughts is
-// on). Keeps chain-of-thought out of the actual chat message so callers can
-// decide how to present it (see routes/openaiCompat.js, which wraps it in
-// <think></think> tags).
 export function extractParts(candidate) {
   const parts = candidate?.content?.parts || [];
   let content = '';
