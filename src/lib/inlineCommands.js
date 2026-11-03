@@ -31,6 +31,7 @@
 //   <PROACTIVE=true|false>
 //
 //   <READ_IMAGE=true|false>   (let Gemini see Janitor media-library images)
+//   <WEB_SEARCH=true|false>   (let Gemini search the web via Google Search)
 //
 // Every matched tag (plus the whitespace/newline immediately around it) is
 // removed from the message text before anything else touches it — none of
@@ -72,6 +73,7 @@ const TAG_DEFS = [
   { key: 'continuity', pattern: tagPattern('CONTINUITY', BOOL_ALT), parse: boolParse },
   { key: 'proactive', pattern: tagPattern('PROACTIVE', BOOL_ALT), parse: boolParse },
   { key: 'readImage', pattern: tagPattern('READ_IMAGE', BOOL_ALT), parse: boolParse },
+  { key: 'webSearch', pattern: tagPattern('WEB_SEARCH', BOOL_ALT), parse: boolParse },
 ];
 
 // Keys that map straight onto cfg fields of the same name.
@@ -90,6 +92,7 @@ const CFG_KEYS = [
   'continuity',
   'proactive',
   'readImage',
+  'webSearch',
 ];
 
 // Runs every tag pattern over one string, recording the LAST value seen for

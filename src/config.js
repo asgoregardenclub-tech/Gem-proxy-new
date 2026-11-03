@@ -80,6 +80,7 @@ export const config = {
   enableBrailleTrick: process.env.ENABLE_BRAILLE_TRICK === 'true',
   enableNoAss: process.env.ENABLE_NOASS === 'true',
   enableGoogleSearch: process.env.ENABLE_GOOGLE_SEARCH === 'true',
+  webSearch: process.env.WEB_SEARCH === 'true' || process.env.ENABLE_GOOGLE_SEARCH === 'true',
 
   readImage: process.env.READ_IMAGE === 'true',
   readImageHosts: (process.env.READ_IMAGE_HOSTS || 'ella.janitorai.com')

@@ -131,6 +131,11 @@ const PROACTIVE_TEXT =
   'decisions, pursue goals, introduce complications, and move the plot forward. Do not end replies by simply handing ' +
   'the scene back; always give the user something concrete to react to.';
 
+const WEB_SEARCH_TEXT =
+  'WEB SEARCH: You have access to Google Search. Actively use it to look up real-world facts, current events, ' +
+  'real locations, pop culture, and canon lore or character details whenever they come up, and weave accurate ' +
+  'details naturally into your reply.';
+
 // Builds the combined directive text for a cfg, or undefined if nothing is on.
 export function buildRoleplayDirectives(cfg = {}) {
   const parts = [];
@@ -159,6 +164,7 @@ export function buildRoleplayDirectives(cfg = {}) {
   if (cfg.realism) parts.push(REALISM_TEXT);
   if (cfg.continuity) parts.push(CONTINUITY_TEXT);
   if (cfg.proactive) parts.push(PROACTIVE_TEXT);
+  if (cfg.webSearch) parts.push(WEB_SEARCH_TEXT);
 
   if (!parts.length) return undefined;
   return 'ROLEPLAY STYLE DIRECTIVES (follow these in every reply):\n\n' + parts.join('\n\n');

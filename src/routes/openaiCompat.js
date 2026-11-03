@@ -210,7 +210,9 @@ router.post(COMPLETION_ROUTES, async (req, res, next) => {
       generationConfig,
       safetySettings: buildSafetySettings(config),
       ...(systemInstruction ? { systemInstruction } : {}),
-      ...(config.enableGoogleSearch ? { tools: [{ googleSearch: {} }] } : {}),
+      ...(effectiveConfig.webSearch ?? effectiveConfig.enableGoogleSearch
+        ? { tools: [{ googleSearch: {} }] }
+        : {}),
     };
 
     wantsStream = Boolean(body.stream);

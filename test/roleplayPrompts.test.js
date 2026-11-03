@@ -146,3 +146,23 @@ test('<PACING=normal> overrides a Railway-level slow to nothing', () => {
   const { cfg } = applyInlineCommands({ pacing: 'slow' }, {}, commands);
   assert.equal(buildRoleplayDirectives(cfg), undefined);
 });
+
+test('WEB_SEARCH toggle and <WEB_SEARCH=...> inline tag work', () => {
+  assert.ok(buildRoleplayDirectives({ webSearch: true }).includes('WEB SEARCH'));
+  assert.equal(buildRoleplayDirectives({ webSearch: false }), undefined);
+
+  const { commands, messages } = extractInlineCommands([
+    { role: 'system', content: 'Context.\n<WEB_SEARCH=true>\nMore context.' },
+  ]);
+  assert.equal(messages[0].content, 'Context.\nMore context.');
+  assert.equal(commands.webSearch, true);
+
+  const { cfg } = applyInlineCommands({ webSearch: false }, {}, commands);
+  assert.equal(cfg.webSearch, true);
+  assert.ok(buildRoleplayDirectives(cfg).includes('WEB SEARCH'));
+
+  const { commands: offCmd } = extractInlineCommands([{ role: 'system', content: '<WEB_SEARCH=false>' }]);
+  const { cfg: offCfg } = applyInlineCommands({ webSearch: true }, {}, offCmd);
+  assert.equal(offCfg.webSearch, false);
+  assert.equal(buildRoleplayDirectives(offCfg), undefined);
+});
