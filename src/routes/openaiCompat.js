@@ -231,10 +231,19 @@ router.post(COMPLETION_ROUTES, async (req, res, next) => {
           : config.gcpServiceAccount;
 
       const projectId = sa.project_id;
-      const location = config.gcpRegion || 'global';
+      const location = (config.gcpRegion || 'us').trim().toLowerCase();
+
+      let host;
+      if (location === 'global') {
+        host = 'aiplatform.googleapis.com';
+      } else if (location === 'us' || location === 'eu') {
+        host = `aiplatform.${location}.rep.googleapis.com`;
+      } else {
+        host = `${location}-aiplatform.googleapis.com`;
+      }
 
       targetUrl = new URL(
-        `https://aiplatform.googleapis.com/v1/projects/${projectId}/locations/${location}/publishers/google/models/${model}:${method}${wantsStream ? '?alt=sse' : ''}`
+        `https://${host}/v1/projects/${projectId}/locations/${location}/publishers/google/models/${model}:${method}${wantsStream ? '?alt=sse' : ''}`
       );
 
       const token = await getVertexToken(sa);
