@@ -22,7 +22,7 @@ export const config = {
 
   // Vertex AI / Google Cloud configuration ($300 GCP free quota)
   gcpServiceAccount: process.env.GCP_SERVICE_ACCOUNT_KEY || undefined,
-  gcpRegion: process.env.GCP_REGION || 'global',
+  gcpRegion: (process.env.GCP_REGION || 'us').trim().toLowerCase(),
 
   // How long a key sits out of rotation after a transient error
   keyCooldownMs: Number(process.env.KEY_COOLDOWN_MS || 60_000),
@@ -47,8 +47,8 @@ export const config = {
   rateLimitMax: Number(process.env.RATE_LIMIT_MAX || 180),
   requestTimeoutMs: Number(process.env.REQUEST_TIMEOUT_MS || 600_000),
 
-  retryAttempts: Number(process.env.RETRY_ATTEMPTS || 1),
-  retryBaseDelayMs: Number(process.env.RETRY_BASE_DELAY_MS || 500),
+  retryAttempts: Number(process.env.RETRY_ATTEMPTS || 3),
+  retryBaseDelayMs: Number(process.env.RETRY_BASE_DELAY_MS || 1500),
 
   // Waiting in line (LINE_WAITING)
   lineWaiting: process.env.LINE_WAITING === 'true',
